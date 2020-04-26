@@ -72,7 +72,7 @@ class __mergedConfigs:
                 t = tuple(int(i) for i in t)
                 if t[0] > 23:
                     raise ValueError("24 hours a day is all the time we have: check configured 'quota_reset_hour'")
-                for i in t:
+                for i in t[1:]:
                     if i > 59:
                         raise ValueError("AbuseIPDB plugin can't bend time: check configured 'quota_reset_hour'")
             except AttributeError:

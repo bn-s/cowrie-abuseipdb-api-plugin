@@ -14,7 +14,7 @@
     tollerance_window = 360
     tollerance_attempts = 10
     rereport_after = 24
-    dump_file = ${honeypot:state_path}/abuseipdb/aipdb.dump
+    dump_path = ${honeypot:state_path}/abuseipdb
     api_key =
     ```
 

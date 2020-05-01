@@ -18,7 +18,7 @@ class Output(output.Output):
     def start(self):
         self.tollerance_attempts = CowrieConfig().getint('output_abuseipdb', 'tollerance_attempts', fallback=10)
         self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
-        self.state_dump = Path(self.state_path, 'aipdb.dump')
+        self.state_dump = Path(*(d for d in self.state_path.split('/')), 'aipdb.dump')
 
         self.logbook = LogBook(self.tollerance_attempts)
 

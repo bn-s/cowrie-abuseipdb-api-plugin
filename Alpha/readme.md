@@ -18,7 +18,7 @@
     api_key =
     ```
 
-3. Enter your AbuseIPDB API key and configure the tollerance and re-reporting settings as you whish.
+3. Enter your AbuseIPDB API key and configure the tollerance and re-reporting settings as you wish.
 
 ### Configuration options
 
@@ -28,7 +28,7 @@ The number of login attempts to be ovserved from an IP address before reporting 
 
 #### `tollerance_window`
 
-The window of time (in minutes) in which login attempts will be counted. As an example, if `tollerance_attempts` is set to `2` and `tollerance_window` is set to one, an IP address making on login attempt every 61 seconds will go unreported. If, however, an IP address made two login attempts within a minute, it will be reported.
+The window of time (in minutes) in which login attempts will be counted. As an example, if `tollerance_attempts` is set to `2` and `tollerance_window` is set to `1`, an IP address making one login attempt every 61 seconds will go unreported. If, however, an IP address makes two login attempts within a minute, it will be reported.
 
 #### `rereport_after`
 

@@ -1,10 +1,13 @@
 import pickle
 from collections import deque
 from datetime import datetime
+from os.path import join
+from pathlib import Path
 from time import time
 
 from treq import post
-from twisted.internet import reactor, defer
+
+from twisted.internet import defer, reactor
 from twisted.python import log
 from twisted.web import http
 
@@ -15,7 +18,8 @@ from cowrie.core.config import CowrieConfig
 class Output(output.Output):
     def start(self):
         self.tollerance_attempts = CowrieConfig().getint('output_abuseipdb', 'tollerance_attempts', fallback=10)
-        self.state_dump = CowrieConfig().get('output_abuseipdb', 'dump_file')
+        self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
+        self.state_dump = join(self.state_path, 'aipdb.dump')
 
         self.logbook = LogBook(self.tollerance_attempts)
 
@@ -24,6 +28,7 @@ class Output(output.Output):
         try:
             with open(self.state_dump, 'rb') as f:
                 self.logbook.update(pickle.load(f))
+
         except FileNotFoundError:
             pass
 
@@ -31,7 +36,6 @@ class Output(output.Output):
             if self.logbook['sleeping']:
                 t_wake = self.logbook['sleep_until']
                 t_now = time()
-                log.msg(t_wake - t_now)
                 if t_wake > t_now:
                     self.logbook.sleeping = True
                     self.logbook.sleepuntil = t_wake
@@ -59,6 +63,11 @@ class Output(output.Output):
         for k, v in self.logbook.items():
             dump[k] = v
 
+        try:
+            Path(self.state_path).mkdir(mode=0o700, parents=False, exist_ok=False)
+        except FileExistsError:
+            pass
+
         with open(self.state_dump, 'wb') as f:
             pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -81,7 +90,7 @@ class Output(output.Output):
                             self.reporter.report_ip(ip)
 
                     elif self.logbook.can_rereport(ip, t):
-                        self.logbook[ip].append(t)
+                        self.logbook[ip] = deque([t], maxlen=self.tollerance_attempts)
 
                     else:
                         return
@@ -126,25 +135,29 @@ class LogBook(dict):
         for k in self:
             if not self[k]:
                 delete_me.append(k)
+        self.delete_entries(delete_me)
+
+    def delete_entries(self, delete_me):
         for i in delete_me:
             del self[i]
 
     def can_rereport(self, ip_key, current_time):
-        log.msg(ip_key, self[ip_key])
         try:
             if current_time > self[ip_key][1] + self.rereport_after:
-                self[ip_key] = deque(maxlen=self.tollerance_attempts)
                 return True
             else:
                 return False
-        except (TypeError, IndexError):
-            return None
+        except IndexError:
+            return True
 
     def full_cleanup(self):
         t = time()
+        delete_me = []
         for k in self:
-            self.can_rereport(k, t)
+            if self.can_rereport(k, t):
+                delete_me.append(k)
             self.clean_expired_timestamps(k, t)
+        self.delete_entries(delete_me)
         self.find_and_delete_empty_entries()
         reactor.callLater(3600, self.full_cleanup)
 
@@ -160,8 +173,6 @@ class Reporter:
 
         self.logbook[ip] = (None, t_last)
 
-        log.msg(t_last)
-
         t_last = self.epoch_to_string_utc(t_last)
 
         params = {
@@ -176,7 +187,6 @@ class Reporter:
     def epoch_to_string_utc(self, t):
         t_utc = datetime.utcfromtimestamp(t)
         return t_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-
 
     @defer.inlineCallbacks
     def http_request(self, params):
@@ -195,7 +205,6 @@ class Reporter:
                 headers=headers,
                 params=params,
                 )
-            log.msg(response.headers)
 
         except Exception as e:
             log.msg(

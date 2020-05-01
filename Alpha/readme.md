@@ -18,7 +18,7 @@
     api_key =
     ```
 
-3. Enter your AbuseIPDB API key and configure the tollerance and re-reporting settings as you whish.
+3. Enter your AbuseIPDB API key and configure the tollerance and re-reporting settings as you wish.
 
 ### Configuration options
 

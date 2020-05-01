@@ -1,8 +1,7 @@
 import pickle
 from collections import deque
 from datetime import datetime
-from os.path import join
-from pathlib import Path
+from pathlib import Path, PurePath
 from time import time
 
 from treq import post
@@ -19,7 +18,7 @@ class Output(output.Output):
     def start(self):
         self.tollerance_attempts = CowrieConfig().getint('output_abuseipdb', 'tollerance_attempts', fallback=10)
         self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
-        self.state_dump = join(self.state_path, 'aipdb.dump')
+        self.state_dump = PurePath(self.state_path, 'aipdb.dump')
 
         self.logbook = LogBook(self.tollerance_attempts)
 

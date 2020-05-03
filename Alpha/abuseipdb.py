@@ -29,46 +29,49 @@ spammers, and abusive activity on the internet." <https://www.abuseipdb.com/>
 
 
 __author__ = 'Benjamin Stephens'
-__version__ = '0.1a3'
+__version__ = '0.2a2'
 
 
 import pickle
 from collections import deque
 from datetime import datetime
+from json.decoder import JSONDecodeError
 from pathlib import Path
 from time import time
 
 from treq import post
 
-from twisted.internet import defer, reactor
+from twisted.internet import defer, reactor, threads
 from twisted.python import log
+from twisted.web import http
 
 from cowrie.core import output
 from cowrie.core.config import CowrieConfig
 
 
-ABUSEIP_URL = 'https://api.abuseipdb.com/api/v2/report'
 DUMP_FILE = 'aipdb.dump'
+# AbuseIPDB will just 429 us if we report an IP more than once every 900 seconds
+REREPORT_MINIMUM = 900
+ABUSEIP_URL = 'https://api.abuseipdb.com/api/v2/report'
+CLEANUP_SCHED = 600
 
 
 class Output(output.Output):
     def start(self):
         self.tollerance_attempts = CowrieConfig().getint('output_abuseipdb', 'tollerance_attempts', fallback=10)
+        self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
+        self.state_path = Path(*(d for d in self.state_path.split('/')))
+        self.state_dump = self.state_path / DUMP_FILE
 
-        self.logbook = LogBook(self.tollerance_attempts)
-        # Pass the our instance of LogBook() to Reporter() so we don't end up
+        self.logbook = LogBook(self.tollerance_attempts, self.state_dump)
+        # Pass our instance of LogBook() to Reporter() so we don't end up
         # working with different records.
         self.reporter = Reporter(self.logbook, self.tollerance_attempts)
 
         # We store the LogBook state any time a shutdown occurs. The rest of our
         # startup method is just for loading and cleaning the previous state
-        self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
-        self.state_path = Path(*(d for d in self.state_path.split('/')))
-        self.state_dump = self.state_path / DUMP_FILE
-
         try:
-            # First we try and open the dump file and update our logbook with
-            # it
+            # First we try and open the dump file and update our logbook with it
             with open(self.state_dump, 'rb') as f:
                 self.logbook.update(pickle.load(f))
 
@@ -78,9 +81,8 @@ class Output(output.Output):
                 t_wake = self.logbook['sleep_until']
                 t_now = time()
                 if t_wake > t_now:
-                    # If we're still meant to be asleep, we'll set logbook sleep
-                    # to true and set the sleepuntil again (in case we get shutdown
-                    # again before waking up)...
+                    # If we're still meant to be asleep, we'll set logbook.sleep
+                    # to true and logbook.sleepuntil to the time we can wakeup
                     self.logbook.sleeping = True
                     self.logbook.sleepuntil = t_wake
                     # and we set an alarm so the reactor knows when he can drag
@@ -91,17 +93,18 @@ class Output(output.Output):
             del self.logbook['sleep_until']
 
             # And we do a cleanup to make sure we're not carrying any expired
-            # entries. The cleanup task ends with a callLater calling itself,
+            # entries. The cleanup task ends by calling itself with a callLater,
             # ensuring it will run every hour until the end of time.
-            self.logbook.full_cleanup()
 
-        except FileNotFoundError:
+        except (pickle.UnpicklingError, FileNotFoundError):
             if self.state_path.exists():
                 pass
             else:
                 # If we don't already have an abuseipdb directory, let's make
-                # one with the required permissions now.
+                # one with the necessary permissions now.
                 Path(self.state_path).mkdir(mode=0o700, parents=False, exist_ok=False)
+
+        self.logbook.cleanup_and_dump_state()
 
         log.msg(
             eventid='cowrie.abuseipdb.start',
@@ -109,18 +112,7 @@ class Output(output.Output):
         )
 
     def stop(self):
-        self.logbook.full_cleanup()
-
-        dump = {
-            'sleeping': self.logbook.sleeping,
-            'sleep_until': self.logbook.sleepuntil
-        }
-
-        for k, v in self.logbook.items():
-            dump[k] = v
-
-        with open(self.state_dump, 'wb') as f:
-            pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self.logbook.cleanup_and_dump_state(mode=1)
 
     def write(self, ev):
         if self.logbook.sleeping:
@@ -130,14 +122,14 @@ class Output(output.Output):
 
             if self.tollerance_attempts <= 1:
                 # If tollerance_attempts was set to 1 or 0, we don't need to
-                # keep logs so our handling of the event is different if so.
+                # keep logs so our handling of the event is different.
                 self.intollerant_observer(ev['src_ip'], time(), ev['username'])
 
             else:
                 self.tollerant_observer(ev['src_ip'], time())
 
     def intollerant_observer(self, ip, t, uname):
-        # Checks if already reported; if so checks if we're ready to re-report.
+        # Checks if already reported; if yer, checks if we're ready to re-report.
         # The entry for a reported IP is a tuple (None, time_reported).
         # If IP not already in logbook, reports immediately
         if ip in self.logbook:
@@ -181,18 +173,24 @@ class Output(output.Output):
 class LogBook(dict):
     """ Dictionary for recording honeypot activity; associated cleanup methods.
     """
-    def __init__(self, tollerance_attempts):
+    def __init__(self, tollerance_attempts, state_dump):
         self.sleeping = False
         self.sleepuntil = 0
         self.tollerance_attempts = tollerance_attempts
         self.tollerance_window = 60 * CowrieConfig().getint('output_abuseipdb', 'tollerance_window', fallback=30)
         self.rereport_after = 3600 * CowrieConfig().getfloat('output_abuseipdb', 'rereport_after', fallback=24)
+        if self.rereport_after < 900:
+            self.rereport_after = REREPORT_MINIMUM
+        self.state_dump = state_dump
+        # Cheap hack for thread safety--see write_dump_file() --> write_done()
+        self._writing = False
         super().__init__()
 
     def wakeup(self):
         # This is the method we pass in a reactor.callLater() before we go to sleep.
         self.sleeping = False
         self.sleepuntil = 0
+        self.cleanup_and_dump_state()
         log.msg(
             eventid='cowrie.abuseipdb.wakeup',
             format='AbuseIPDB plugin resuming activity after receiving '
@@ -245,17 +243,67 @@ class LogBook(dict):
         except IndexError:
             return True
 
-    def full_cleanup(self):
+    def cleanup_and_dump_state(self, mode=0):
         # Coordinates a full cleanup of the logbook. Re-calls itself in an hour
-        t = time()
+        # MODES:
+        # 0) Normal looping task;
+        # 1) Cleanup on sleep/stop. Cancels scheduled callLater() and
+        # doesn't recall itself.
+        if mode == 1:
+            try:
+                self.recall.cancel()
+            except AttributeError:
+                pass
+
+        if self.sleeping:
+            t = self.sleepuntil
+        else:
+            t = time()
+
         delete_me = []
+
         for k in self:
             if self.can_rereport(k, t):
                 delete_me.append(k)
             self.clean_expired_timestamps(k, t)
+
         self.delete_entries(delete_me)
+
         self.find_and_delete_empty_entries()
-        reactor.callLater(3600, self.full_cleanup)
+
+        self.dump_state()
+
+        if mode == 0 and not self.sleeping:
+            self.recall = reactor.callLater(CLEANUP_SCHED, self.cleanup_and_dump_state)
+
+    def dump_state(self):
+        dump = {
+            'sleeping': self.sleeping,
+            'sleep_until': self.sleepuntil
+        }
+
+        for k, v in self.items():
+            dump[k] = v
+
+        if self._writing:
+            return
+
+        write_dump = threads.deferToThread(self.write_dump_file, dump)
+
+        # errback is same as callback for now... it's not too serious if 
+        # write_dump fails so for now there's no handling for it other than to
+        # remove our cheap 'lock' on the file. If the file is corrupted because
+        # write f'ed up, we catch the error on startup and life goes on... just
+        # means we lost our state.
+        write_dump.addCallbacks(self.write_done, self.write_done)
+
+    def write_dump_file(self, dump):
+        self._writing = True
+        with open(self.state_dump, 'wb') as f:
+            pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def write_done(self, *args):
+        self._writing = False
 
 
 class Reporter:
@@ -307,6 +355,17 @@ class Reporter:
 
     @defer.inlineCallbacks
     def http_request(self, params):
+
+        def log_response_failed(ip, response, reason):
+            log.msg(
+                eventid='cowrie.abuseipdb.reportfail',
+                format='AbuseIPDB plugin failed to report IP %(IP)s. Received HTTP '
+                        'status code %(response)s in response. Reason: %(reason)s.',
+                IP=ip,
+                response=response,
+                reason=reason,
+            )
+
         try:
             response = yield post(
                 url=ABUSEIP_URL,
@@ -324,34 +383,47 @@ class Reporter:
             )
             return
 
-        if response.code != 200:
-            log.msg(
-                eventid='cowrie.abuseipdb.reportfail',
-                format='AbuseIPDB plugin failed to report IP %(IP)s. Received HTTP '
-                       'status code in response: %(response)s.',
-                IP=params['ip'],
-                response=response.code,
-            )
+        if response.code != http.OK:
+            if response.code == 429:
+                # Handles rate limiting.
+                try:
+                    j = yield response.json()
+                    reason = j['errors'][0]['detail']
 
-            # AbuseIPDB will repond with a Retry-After header in its response
-            # if we've exceeded our limits for the day. Here we check for that
-            # header and, if it exists, put ourselves to sleep.
-            retry_after = yield response.headers.hasHeader('Retry-After')
+                except (KeyError, JSONDecodeError):
+                    reason = 'No other information provided or unexpected response'
 
-            if retry_after:
-                retry = yield response.headers.getRawHeaders('Retry-After')
-                retry = int(retry.pop())
+                log_response_failed(params['ip'], response.code, reason)
 
-                log.msg(
-                    eventid='cowrie.abuseipdb.ratelimited',
-                    format='AbuseIPDB plugin received Retry-After header in response. '
-                           'Reporting activity will resume in %(retry_after)s seconds.',
-                    retry_after=retry,
-                )
+                # AbuseIPDB will respond with a 429 and a Retry-After in its
+                # response headers if we've exceeded our limits for the day. Here
+                # we test for that header and, if it exists, put ourselves to sleep.
+                retry_after = yield response.headers.hasHeader('Retry-After')
 
-                self.logbook.sleeping = True
-                self.logbook.sleepuntil = time() + retry
-                reactor.callLater(retry, self.logbook.wakeup)
+                if retry_after:
+                    retry = yield response.headers.getRawHeaders('Retry-After')
+                    retry = int(retry.pop())
+
+                    log.msg(
+                        eventid='cowrie.abuseipdb.ratelimited',
+                        format='AbuseIPDB plugin received Retry-After header in response. '
+                                'Reporting activity will resume in %(retry_after)s seconds.',
+                        retry_after=retry,
+                    )
+
+                    self.logbook.sleeping = True
+                    self.logbook.sleepuntil = time() + retry
+                    reactor.callLater(retry, self.logbook.wakeup)
+                    self.logbook.cleanup_and_dump_state(mode=1)
+
+                return
+
+            try:
+                reason = http.RESPONSES[response.code].decode('utf-8')
+            except Exception:
+                reason = 'Unable to determine.'
+
+            log_response_failed(params['ip'], response.code, reason)
 
             return
 

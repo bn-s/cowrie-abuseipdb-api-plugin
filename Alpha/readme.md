@@ -8,29 +8,46 @@
 
 2. Copy the configuration below into ~/cowrie/etc/cowrie.cfg.
 
-    ```conf
-    [output_abuseipdb]
-    enabled = true
-    tollerance_window = 360
-    tollerance_attempts = 10
-    rereport_after = 24
-    dump_path = ${honeypot:state_path}/abuseipdb
-    api_key =
-    ```
+```
+# /-- ABUSEIPDB --/
+# Plugin for reporting login attempts via the AbuseIPDB API. Counts attempts
+# made by an IP address within a sliding window of time and, if the number of
+# attempts made exceeds the set tollerance for attempts, reports the IP 
+# address.
+#
+# For example, with tollerance_window set to 1 and tollerance_attempts set to
+# 2, an IP making a login attempt every 60 seconds will go unreported. If,
+# however, this IP address made a login attempt less than a minute after a
+# previous attempt, it would be reported.
+#
+# Setting tollerance_attempts to 1 or 0 renders the tollerance_window setting
+# irrelevant. When set like so we also send the username used in the report
+# comments.
 
-3. Enter your AbuseIPDB API key and configure the tollerance and re-reporting settings as you wish.
+[output_abuseipdb]
+enabled = true
 
-### Configuration options
+# This plugin keeps a record of what it's up to here so we can survive restarts
+# and shutdowns without forgetting which IPs have been reported, which ones
+# we're monitoring and whether we've been rate limited recently. Auto-saves
+# every 10 minutes and when cowrie is stopped. If you are going to set a custom
+# directory here, ensure that permissions are set so that only the user who
+# runs Cowrie has write/execute permissions in the directory!
 
-#### `tollerance_attempts`
+dump_path = ${honeypot:state_path}/abuseipdb
 
-The number of login attempts to be ovserved from an IP address before reporting it.
+# tollerance_window is in minutes
+tollerance_window = 180
+tollerance_attempts = 10
 
-#### `tollerance_window`
+# rereport_after is in hours. Accepts a float (number with decimal places) as
+# input. There is a hardcoded minimum of 0.25 (15 minutes); any setting below
+# this will default back to the minimum.
 
-The window of time (in minutes) in which login attempts will be counted. As an example, if `tollerance_attempts` is set to `2` and `tollerance_window` is set to `1`, an IP address making one login attempt every 61 seconds will go unreported. If, however, an IP address makes two login attempts within a minute, it will be reported.
+rereport_after = 6
 
-#### `rereport_after`
+# Insert your key here to unlock the gate to the AbuseIPDB API kingdom.
 
-The number of hours to wait before making another report for the same IP address.
-
+api_key =
+# /-- END ABUSEIPDB --/
+```

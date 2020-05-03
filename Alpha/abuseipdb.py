@@ -29,7 +29,7 @@ spammers, and abusive activity on the internet." <https://www.abuseipdb.com/>
 
 
 __author__ = 'Benjamin Stephens'
-__version__ = '0.2a2'
+__version__ = '0.2a3'
 
 
 import pickle
@@ -41,7 +41,7 @@ from time import time
 
 from treq import post
 
-from twisted.internet import defer, reactor, threads
+from twisted.internet import defer, reactor
 from twisted.python import log
 from twisted.web import http
 
@@ -49,11 +49,15 @@ from cowrie.core import output
 from cowrie.core.config import CowrieConfig
 
 
-DUMP_FILE = 'aipdb.dump'
-# AbuseIPDB will just 429 us if we report an IP more than once every 900 seconds
-REREPORT_MINIMUM = 900
-ABUSEIP_URL = 'https://api.abuseipdb.com/api/v2/report'
+# How often we cleanup our lists/dict...
 CLEANUP_SCHED = 600
+# ...and where we dump them to.
+DUMP_FILE = 'aipdb.dump'
+
+ABUSEIP_URL = 'https://api.abuseipdb.com/api/v2/report'
+# AbuseIPDB will just 429 us if we report an IP more than once every 15 minutes
+# (900 seconds), so we set that lower limit here.
+REREPORT_MINIMUM = 900
 
 
 class Output(output.Output):
@@ -68,15 +72,15 @@ class Output(output.Output):
         # working with different records.
         self.reporter = Reporter(self.logbook, self.tollerance_attempts)
 
-        # We store the LogBook state any time a shutdown occurs. The rest of our
-        # startup method is just for loading and cleaning the previous state
+        # We store the LogBook state any time a shutdown occurs. The rest of
+        # our start method is just for loading and cleaning the previous state
         try:
             # First we try and open the dump file and update our logbook with it
             with open(self.state_dump, 'rb') as f:
                 self.logbook.update(pickle.load(f))
 
             # Check to see if we're still asleep after receiving a Retry-After
-            # header in a response
+            # header in a previous response
             if self.logbook['sleeping']:
                 t_wake = self.logbook['sleep_until']
                 t_now = time()
@@ -92,10 +96,6 @@ class Output(output.Output):
             del self.logbook['sleeping']
             del self.logbook['sleep_until']
 
-            # And we do a cleanup to make sure we're not carrying any expired
-            # entries. The cleanup task ends by calling itself with a callLater,
-            # ensuring it will run every hour until the end of time.
-
         except (pickle.UnpicklingError, FileNotFoundError):
             if self.state_path.exists():
                 pass
@@ -104,6 +104,9 @@ class Output(output.Output):
                 # one with the necessary permissions now.
                 Path(self.state_path).mkdir(mode=0o700, parents=False, exist_ok=False)
 
+        # And we do a cleanup to make sure that we're not carrying any expired
+        # entries. The cleanup task ends by calling itself with a callLater,
+        # ensuring it will run every hour until the end of time.        
         self.logbook.cleanup_and_dump_state()
 
         log.msg(
@@ -129,7 +132,7 @@ class Output(output.Output):
                 self.tollerant_observer(ev['src_ip'], time())
 
     def intollerant_observer(self, ip, t, uname):
-        # Checks if already reported; if yer, checks if we're ready to re-report.
+        # Checks if already reported; if yes, checks if we're ready to rereport.
         # The entry for a reported IP is a tuple (None, time_reported).
         # If IP not already in logbook, reports immediately
         if ip in self.logbook:
@@ -141,13 +144,13 @@ class Output(output.Output):
             self.reporter.report_ip_single(ip, t, uname)
 
     def tollerant_observer(self, ip, t):
-        # Appends the time an IP was seen to it's list in logbook. Once the length
-        # of the list equals our tollerance_attempts, the IP is reported.
+        # Appends the time an IP was seen to it's list in logbook. Once the
+        # length of the list equals our tollerance_attempts, the IP is reported.
         if ip in self.logbook:
             try:
                 if self.logbook[ip][0]:
-                    # Evaluates true if not reported IP. If reported, logbook
-                    # entry is of the form (None, time_reported).
+                    # Evaluates true if IP not already reported. If reported,
+                    # logbook entry is of the form (None, time_reported).
                     self.logbook[ip].append(t)
                     self.logbook.clean_expired_timestamps(ip, t)
 
@@ -179,15 +182,17 @@ class LogBook(dict):
         self.tollerance_attempts = tollerance_attempts
         self.tollerance_window = 60 * CowrieConfig().getint('output_abuseipdb', 'tollerance_window', fallback=30)
         self.rereport_after = 3600 * CowrieConfig().getfloat('output_abuseipdb', 'rereport_after', fallback=24)
-        if self.rereport_after < 900:
+        if self.rereport_after < REREPORT_MINIMUM:
             self.rereport_after = REREPORT_MINIMUM
         self.state_dump = state_dump
-        # Cheap hack for thread safety--see write_dump_file() --> write_done()
+        # To write our dump to disk we have a method we call in a thread so we
+        # don't block if we get slow io. This is a cheap hack for thread
+        # safety. See self.write_dump_file()
         self._writing = False
         super().__init__()
 
     def wakeup(self):
-        # This is the method we pass in a reactor.callLater() before we go to sleep.
+        # This is the method we pass in a callLater() before we go to sleep.
         self.sleeping = False
         self.sleepuntil = 0
         self.cleanup_and_dump_state()
@@ -261,12 +266,10 @@ class LogBook(dict):
             t = time()
 
         delete_me = []
-
         for k in self:
             if self.can_rereport(k, t):
                 delete_me.append(k)
             self.clean_expired_timestamps(k, t)
-
         self.delete_entries(delete_me)
 
         self.find_and_delete_empty_entries()
@@ -285,24 +288,19 @@ class LogBook(dict):
         for k, v in self.items():
             dump[k] = v
 
+        reactor.callInThread(self.write_dump_file, dump)
+
+    def write_dump_file(self, dump):
         if self._writing:
             return
 
-        write_dump = threads.deferToThread(self.write_dump_file, dump)
-
-        # errback is same as callback for now... it's not too serious if 
-        # write_dump fails so for now there's no handling for it other than to
-        # remove our cheap 'lock' on the file. If the file is corrupted because
-        # write f'ed up, we catch the error on startup and life goes on... just
-        # means we lost our state.
-        write_dump.addCallbacks(self.write_done, self.write_done)
-
-    def write_dump_file(self, dump):
+        # Acquire 'lock'
         self._writing = True
+
         with open(self.state_dump, 'wb') as f:
             pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    def write_done(self, *args):
+        # Release 'lock'
         self._writing = False
 
 
@@ -414,6 +412,13 @@ class Reporter:
                     self.logbook.sleeping = True
                     self.logbook.sleepuntil = time() + retry
                     reactor.callLater(retry, self.logbook.wakeup)
+                    # It's not serious if we don't, but it's best to call the
+                    # cleanup after logbook.sleeping has been set to True.
+                    # The cleanup method checks for this flag and will use
+                    # the wakeup time rather than the current time for deleting
+                    # entries when sleep is set. mode=1 ensures we cancel any
+                    # already scheduled calls to cleanup and that we don't
+                    # schedule another until the wakeup method calls it again.
                     self.logbook.cleanup_and_dump_state(mode=1)
 
                 return

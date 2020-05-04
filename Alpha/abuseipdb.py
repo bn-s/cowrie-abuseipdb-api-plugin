@@ -37,6 +37,7 @@ from collections import deque
 from datetime import datetime
 from json.decoder import JSONDecodeError
 from pathlib import Path
+from sys import version_info
 from time import sleep, time
 
 from treq import post
@@ -62,10 +63,24 @@ REREPORT_MINIMUM = 900
 
 class Output(output.Output):
     def start(self):
+        if version_info.major < 3 and version_info.minor < 5:
+            log.msg('Currently running Python version {}.{}.{}. AbuseIPDB '
+                    'Plugin requires Python 3.5 or higher.'.format(
+                        version_info.major,
+                        version_info.minor,
+                        version_info.micro,
+                    )
+            )
+            raise Exception("AbuseIPDB Plugin requires python 3.5 or higher")
+
         self.tollerance_attempts = CowrieConfig().getint('output_abuseipdb', 'tollerance_attempts', fallback=10)
         self.state_path = CowrieConfig().get('output_abuseipdb', 'dump_path')
         self.state_path = Path(*(d for d in self.state_path.split('/')))
         self.state_dump = self.state_path / DUMP_FILE
+
+        if version_info.minor < 6:
+            # PathLike object not campatible with with open() in py3.5
+            self.state_dump = str(self.state_dump)
 
         self.logbook = LogBook(self.tollerance_attempts, self.state_dump)
         # Pass our instance of LogBook() to Reporter() so we don't end up
@@ -75,8 +90,7 @@ class Output(output.Output):
         # We store the LogBook state any time a shutdown occurs. The rest of
         # our startup is just for loading and cleaning the previous state
         try:
-            # For py3.5 open() compatibility, convert Path objects to string.
-            with open(str(self.state_dump), 'rb') as f:
+            with open(self.state_dump, 'rb') as f:
                 self.logbook.update(pickle.load(f))
 
             # Check to see if we're still asleep after receiving a Retry-After
@@ -304,8 +318,7 @@ class LogBook(dict):
         # Acquire 'lock'
         self._writing = True
 
-        # For py3.5 open() compatibility, convert Path objects to string.
-        with open(str(self.state_dump), 'wb') as f:
+        with open(self.state_dump, 'wb') as f:
             pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # Release 'lock'
@@ -366,7 +379,7 @@ class Reporter:
             log.msg(
                 eventid='cowrie.abuseipdb.reportfail',
                 format='AbuseIPDB plugin failed to report IP %(IP)s. Received HTTP '
-                       'status code %(response)s in response. Reason: %(reason)s.',
+                        'status code %(response)s in response. Reason: %(reason)s.',
                 IP=ip,
                 response=response,
                 reason=reason,

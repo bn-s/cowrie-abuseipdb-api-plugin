@@ -29,7 +29,7 @@ spammers, and abusive activity on the internet." <https://www.abuseipdb.com/>
 
 
 __author__ = 'Benjamin Stephens'
-__version__ = '0.3b1'
+__version__ = '0.3b2'
 
 
 import pickle
@@ -75,7 +75,8 @@ class Output(output.Output):
         # We store the LogBook state any time a shutdown occurs. The rest of
         # our startup is just for loading and cleaning the previous state
         try:
-            with open(self.state_dump, 'rb') as f:
+            # For py3.5 open() compatibility, convert Path objects to string.
+            with open(str(self.state_dump), 'rb') as f:
                 self.logbook.update(pickle.load(f))
 
             # Check to see if we're still asleep after receiving a Retry-After
@@ -107,7 +108,7 @@ class Output(output.Output):
         # entries. The cleanup task ends by calling itself in a callLater,
         # thus running every CLEAN_DUMP_SCHED seconds until the end of time.
         self.logbook.cleanup_and_dump_state()
-
+        
         log.msg(
             eventid='cowrie.abuseipdb.started',
             format='AbuseIPDB Plugin version {} started. Currently in beta.'.format(__version__),
@@ -303,7 +304,8 @@ class LogBook(dict):
         # Acquire 'lock'
         self._writing = True
 
-        with open(self.state_dump, 'wb') as f:
+        # For py3.5 open() compatibility, convert Path objects to string.
+        with open(str(self.state_dump), 'wb') as f:
             pickle.dump(dump, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # Release 'lock'
@@ -347,7 +349,7 @@ class Reporter:
         params = {
             'ip': ip,
             'categories': '18,22',
-            'comment': 'Cowrie Honeypot: {} failed SSH/Telnet login attempts '
+            'comment': 'Cowrie Honeypot: {} unauthorised SSH/Telnet login attempts '
                        'between {} and {}'.format(self.attempts, t_first, t_last)
         }
 
@@ -364,7 +366,7 @@ class Reporter:
             log.msg(
                 eventid='cowrie.abuseipdb.reportfail',
                 format='AbuseIPDB plugin failed to report IP %(IP)s. Received HTTP '
-                        'status code %(response)s in response. Reason: %(reason)s.',
+                       'status code %(response)s in response. Reason: %(reason)s.',
                 IP=ip,
                 response=response,
                 reason=reason,

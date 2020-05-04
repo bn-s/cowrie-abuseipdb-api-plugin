@@ -50,7 +50,7 @@ from cowrie.core.config import CowrieConfig
 
 
 # How often we clean and dump and our lists/dict...
-CLEAN_DUMP_SCHED = 6
+CLEAN_DUMP_SCHED = 600
 # ...and the file we dump to.
 DUMP_FILE = 'aipdb.dump'
 
